@@ -1,0 +1,11 @@
+name = "sales-prediction-proxy"
+compatibility_date = "2025-11-11"
+# If you want to publish to your account with a specific route, set your account_id here.
+# account_id = ""
+
+# Set to true to publish to workers.dev subdomain (no account_id required).
+workers_dev = true
+
+[env.production]
+# Replace with your backend API URL, for example: https://api.example.com
+BACKEND_URL = "https://<YOUR_BACKEND_URL>"
