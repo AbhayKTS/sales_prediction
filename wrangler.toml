@@ -16,4 +16,4 @@ route = "https://revenly.pages.dev/*"
 [env.production]
 # For local testing, point the Worker at your locally-running backend below.
 # Change this to your deployed backend when ready (e.g. https://api.example.com)
-BACKEND_URL = "http://localhost:8000"
+BACKEND_URL = "https://sales-prediction-api-obqd.onrender.com"
