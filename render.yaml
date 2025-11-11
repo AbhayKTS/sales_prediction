@@ -1,0 +1,16 @@
+services:
+  - type: web
+    name: sales-prediction-api
+    env: python
+    plan: free
+    buildCommand: |
+      cd campaign-sales-bot
+      pip install -r server/requirements.txt
+    startCommand: |
+      cd campaign-sales-bot
+      uvicorn server.app:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      # Optional: if you later want to override model path or price metadata, add more env vars here.
