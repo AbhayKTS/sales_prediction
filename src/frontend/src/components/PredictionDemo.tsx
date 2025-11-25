@@ -1,319 +1,615 @@
-import { useState, useEffect } from "react";
+import { useEffect, useMemo, useState } from "react";
+import { TrendingUp, Loader2, Sparkles, ActivitySquare } from "lucide-react";
+import { z } from "zod";
+import { toast } from "sonner";
+import { Bar, BarChart, CartesianGrid, XAxis, YAxis } from "recharts";
+
 import { Card } from "./ui/card";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { Label } from "./ui/label";
-import { TrendingUp, Loader2 } from "lucide-react";
-import { toast } from "sonner";
-import { initModel, predictFromChannels, getModelMetrics } from "../lib/model";
+import { Switch } from "./ui/switch";
+import { Progress } from "./ui/progress";
+import { ChartContainer, ChartTooltip, ChartTooltipContent } from "./ui/chart";
+import { cn } from "../lib/utils";
+import {
+  initModel,
+  predictFromChannels,
+  getModelMetrics,
+  getModelCoefficients,
+} from "../lib/model";
+
+type ChannelKey = "tv" | "radio" | "newspaper";
+type ModeOption = "local" | "server";
+
+type FormValues = Record<ChannelKey, string> & { pricePerUnit: string };
+
+type Metrics = {
+  r2?: number | null;
+  test_r2?: number | null;
+  rmse?: number | null;
+  test_rmse?: number | null;
+  mae?: number | null;
+  rel_rmse_pct?: number | null;
+};
+
+type PredictionResult = {
+  unitsK: number;
+  roiFraction: number | null;
+  revenue: number;
+  expense: number;
+  units: number;
+  channelSpend: Record<ChannelKey, number>;
+};
+
+type Coefficients = ReturnType<typeof getModelCoefficients>;
+
+const fieldSchema = z.object({
+  tv: z
+    .number({ invalid_type_error: "Required" })
+    .min(0, "TV spend must be ≥ 0")
+    .max(1_000_000, "TV spend too large"),
+  radio: z
+    .number({ invalid_type_error: "Required" })
+    .min(0, "Radio spend must be ≥ 0")
+    .max(1_000_000, "Radio spend too large"),
+  newspaper: z
+    .number({ invalid_type_error: "Required" })
+    .min(0, "Newspaper spend must be ≥ 0")
+    .max(1_000_000, "Newspaper spend too large"),
+  pricePerUnit: z
+    .number({ invalid_type_error: "Required" })
+    .min(1, "Price per unit must be ≥ 1"),
+});
+
+const DEFAULT_VALUES: FormValues = {
+  tv: "30000",
+  radio: "12000",
+  newspaper: "9000",
+  pricePerUnit: "10",
+};
+
+const CHANNEL_LABELS: Record<ChannelKey, string> = {
+  tv: "TV",
+  radio: "Radio",
+  newspaper: "Newspaper",
+};
+
+const chartConfig = {
+  spend: {
+    label: "Spend ($)",
+    theme: { light: "#facc15", dark: "#facc15" },
+  },
+  impact: {
+    label: "Estimated Units (k)",
+    theme: { light: "#fde047", dark: "#fde047" },
+  },
+};
+
+const currency = (value: number, digits = 0) =>
+  new Intl.NumberFormat("en-US", {
+    style: "currency",
+    currency: "USD",
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  }).format(value);
+
+const numberFmt = (value: number, digits = 0) =>
+  new Intl.NumberFormat("en-US", {
+    maximumFractionDigits: digits,
+    minimumFractionDigits: digits,
+  }).format(value);
+
+type ImportMetaWithEnv = ImportMeta & { env?: Record<string, string | undefined> };
+
+const getEnvBaseUrl = () => {
+  try {
+    return (import.meta as ImportMetaWithEnv)?.env?.VITE_API_BASE_URL;
+  } catch {
+    return undefined;
+  }
+};
 
 const getApiBase = () => {
   if (typeof window === "undefined") return "";
+  const envBase = getEnvBaseUrl();
+  const apiWindow = window as typeof window & { __API_BASE__?: string };
   const candidate =
-    (window as any)["__API_BASE__"] ??
-    import.meta.env.VITE_API_BASE_URL ??
+    apiWindow.__API_BASE__ ??
+    envBase ??
     (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
       ? "http://127.0.0.1:8000"
       : "");
   if (!candidate) return "";
-  return typeof candidate === "string" && candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+  return candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
+};
+
+const parseFormNumbers = (values: FormValues) => ({
+  tv: Number(values.tv) || 0,
+  radio: Number(values.radio) || 0,
+  newspaper: Number(values.newspaper) || 0,
+  pricePerUnit: Number(values.pricePerUnit) || 0,
+});
+
+const normalizeMetrics = (raw: unknown): Metrics | null => {
+  if (!raw || typeof raw !== "object") return null;
+  const metrics = raw as Record<string, any>;
+  if (metrics.linear && typeof metrics.linear === "object") {
+    return {
+      r2: metrics.linear.r2 ?? metrics.r2 ?? null,
+      test_r2: metrics.linear.test_r2 ?? metrics.test_r2 ?? null,
+      rmse: metrics.linear.rmse ?? metrics.rmse ?? null,
+      test_rmse: metrics.linear.test_rmse ?? metrics.test_rmse ?? null,
+      mae: metrics.linear.mae ?? metrics.mae ?? null,
+      rel_rmse_pct: metrics.linear.rel_rmse_pct ?? metrics.rel_rmse_pct ?? null,
+    };
+  }
+
+  return {
+    r2: metrics.r2 ?? null,
+    test_r2: metrics.test_r2 ?? null,
+    rmse: metrics.rmse ?? null,
+    test_rmse: metrics.test_rmse ?? null,
+    mae: metrics.mae ?? null,
+    rel_rmse_pct: metrics.rel_rmse_pct ?? null,
+  };
+};
+
+const computeClientROI = (unitsK: number, pricePerUnit: number, expense: number) => {
+  const units = unitsK * 1000;
+  const revenue = units * pricePerUnit;
+  const roiFraction = expense === 0 ? null : (revenue - expense) / expense;
+  return { units, revenue, roiFraction, expense };
 };
 
 const PredictionDemo = () => {
-  const [tvAmount, setTvAmount] = useState("30000");
-  const [radioAmount, setRadioAmount] = useState("10000");
-  const [newspaperAmount, setNewspaperAmount] = useState("10000");
-  const [useServer, setUseServer] = useState(false); // false = local linear model, true = call server RF
+  const [formValues, setFormValues] = useState<FormValues>(DEFAULT_VALUES);
+  const [mode, setMode] = useState<ModeOption>("local");
   const [predictROI, setPredictROI] = useState(false);
-  const [isLoading, setIsLoading] = useState(false);
-  const [prediction, setPrediction] = useState<number | null>(null);
-  const [predictedROI, setPredictedROI] = useState<number | null>(null); // fraction (e.g. 2.61 => 261%)
-  const [metrics, setMetrics] = useState<any | null>(null);
-  const DEFAULT_PRICE_PER_UNIT = 10; // default price per unit (currency)
+  const [status, setStatus] = useState<"idle" | "loading" | "success" | "error">("idle");
+  const [progressValue, setProgressValue] = useState(0);
+  const [errors, setErrors] = useState<Partial<Record<keyof FormValues, string>>>({});
+  const [metrics, setMetrics] = useState<Metrics | null>(null);
+  const [result, setResult] = useState<PredictionResult | null>(null);
+  const [lastDuration, setLastDuration] = useState<number | null>(null);
+  const [coefficients, setCoefficients] = useState<Coefficients | null>(null);
 
-  const handlePredict = async () => {
-    const tvNum = parseFloat(tvAmount) || 0;
-    const radioNum = parseFloat(radioAmount) || 0;
-    const newspaperNum = parseFloat(newspaperAmount) || 0;
-    const totalExpense = tvNum + radioNum + newspaperNum;
-    if (isNaN(totalExpense) || totalExpense <= 0) {
-      toast.error("Please enter positive amounts for TV, Radio or Newspaper");
-      return;
-    }
-
-    setIsLoading(true);
-    setPrediction(null);
-
-    try {
-      if (useServer) {
-  const base = getApiBase();
-        if (predictROI) {
-          // Call server ROI endpoint (channel-level)
-          const payload: any = { tv: tvNum, radio: radioNum, newspaper: newspaperNum, price_per_unit: DEFAULT_PRICE_PER_UNIT };
-          const resp = await fetch(`${base}/predict/roi/channels`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) });
-          if (!resp.ok) {
-            const txt = await resp.text();
-            throw new Error(`Server error: ${resp.status} ${txt}`);
-          }
-          const json = await resp.json();
-          const roiFrac = json.predicted_roi != null ? Number(json.predicted_roi) : (json.predicted_roi_pct != null ? Number(json.predicted_roi_pct) / 100.0 : NaN);
-          if (Number.isNaN(roiFrac)) throw new Error('Invalid ROI response from server');
-          setPredictedROI(Number(roiFrac));
-          setMetrics(json.metrics ?? null);
-          setIsLoading(false);
-          toast.success('Server ROI prediction completed');
-          return;
-        }
-
-        // Regular channel-level prediction (server)
-        const payload: any = { tv: tvNum, radio: radioNum, newspaper: newspaperNum, price_per_unit: DEFAULT_PRICE_PER_UNIT };
-  const resp = await fetch(`${base}/predict/channels`, {
-          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload)
-        });
-        if (!resp.ok) {
-          const txt = await resp.text();
-          throw new Error(`Server error: ${resp.status} ${txt}`);
-        }
-        const json = await resp.json();
-        const predK = Number(json.predicted_k ?? json.predicted_k?.toString?.() ?? null) || Number(json.predicted_k === 0 ? 0 : NaN);
-        if (Number.isNaN(predK)) throw new Error('Invalid response from prediction server');
-        setPrediction(predK);
-        setMetrics(json.metrics ?? null);
-        setIsLoading(false);
-        toast.success('Server prediction completed');
-      } else {
-        // Local prediction using per-channel inputs
-        const pred = predictFromChannels(tvNum, radioNum, newspaperNum, true);
-        setTimeout(() => {
-          setPrediction(Number(pred));
-          setPredictedROI(null);
-          try { setMetrics(getModelMetrics()); } catch (e) { /* ignore */ }
-          setIsLoading(false);
-          toast.success("Prediction completed successfully");
-        }, 400);
-      }
-    } catch (err) {
-      setIsLoading(false);
-      toast.error((err as Error).message || "Prediction failed");
-    }
-  };
+  const numericValues = useMemo(() => parseFormNumbers(formValues), [formValues]);
+  const totalExpense = numericValues.tv + numericValues.radio + numericValues.newspaper;
 
   useEffect(() => {
-    // initialize model on mount
     let mounted = true;
     initModel()
       .then(() => {
-        if (mounted) toast.success('Model initialized');
-        // fetch metrics
+        if (!mounted) return;
+        toast.success("Local linear model ready");
         try {
-          const m = getModelMetrics();
-          if (mounted) setMetrics(m);
-        } catch (e) {
-          // ignore
+          const modelMetrics = getModelMetrics();
+          setMetrics(normalizeMetrics(modelMetrics));
+          setCoefficients(getModelCoefficients());
+        } catch (err) {
+          console.warn("Unable to bootstrap local metrics", err);
         }
       })
-      .catch((e) => {
-        console.error('Model init failed', e);
-        if (mounted) toast.error('Model initialization failed — using fallback');
+      .catch((err) => {
+        console.error("Model init failed", err);
+        if (mounted) toast.error("Model initialization failed — server mode only");
       });
-    return () => { mounted = false; };
+    return () => {
+      mounted = false;
+    };
   }, []);
 
+  useEffect(() => {
+    if (mode === "local") {
+      setPredictROI(false);
+    }
+  }, [mode]);
+
+  useEffect(() => {
+    if (status !== "loading") return;
+    setProgressValue(12);
+    const interval = window.setInterval(() => {
+      setProgressValue((prev) => (prev >= 88 ? 88 : prev + 4));
+    }, 280);
+    return () => window.clearInterval(interval);
+  }, [status]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") return;
+    if (status === "success") {
+      setProgressValue(100);
+      const timeout = window.setTimeout(() => setProgressValue(0), 500);
+      return () => window.clearTimeout(timeout);
+    }
+    if (status === "error" || status === "idle") {
+      setProgressValue(0);
+    }
+    return undefined;
+  }, [status]);
+
+  const chartData = useMemo(() => {
+    return (Object.keys(CHANNEL_LABELS) as ChannelKey[]).map((key, index) => {
+      const spend = numericValues[key];
+      const beta = coefficients?.betas?.[index] ?? 0;
+      const estimatedImpact = Math.max(0, (spend / 1000) * beta);
+      return {
+        channel: CHANNEL_LABELS[key],
+        spend,
+        impact: Number(estimatedImpact.toFixed(2)),
+      };
+    });
+  }, [numericValues, coefficients]);
+
+  const handleFieldChange = (key: keyof FormValues, value: string) => {
+    setFormValues((prev) => ({ ...prev, [key]: value }));
+  };
+
+  const handleModeChange = (next: ModeOption) => {
+    setMode(next);
+    setResult(null);
+    setStatus("idle");
+  };
+
+  const validateForm = () => {
+    const parsed = parseFormNumbers(formValues);
+    const check = fieldSchema.safeParse(parsed);
+    if (!check.success) {
+      const fieldErrors = check.error.flatten().fieldErrors;
+      setErrors({
+        tv: fieldErrors.tv?.[0],
+        radio: fieldErrors.radio?.[0],
+        newspaper: fieldErrors.newspaper?.[0],
+        pricePerUnit: fieldErrors.pricePerUnit?.[0],
+      });
+      return null;
+    }
+
+    if (parsed.tv + parsed.radio + parsed.newspaper <= 0) {
+      setErrors((prev) => ({ ...prev, tv: "Add at least one channel spend" }));
+      return null;
+    }
+
+    setErrors({});
+    return parsed;
+  };
+
+  const requestServer = async (endpoint: string, payload: Record<string, number>) => {
+    const base = getApiBase();
+    if (!base) {
+      throw new Error("Server base URL missing. Set VITE_API_BASE_URL or window.__API_BASE__.");
+    }
+    const resp = await fetch(`${base}${endpoint}`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!resp.ok) {
+      const body = await resp.text();
+      throw new Error(`Server error: ${resp.status} ${body}`);
+    }
+    return resp.json();
+  };
+
+  const handlePredict = async () => {
+    const parsed = validateForm();
+    if (!parsed) return;
+
+    const payload = {
+      tv: parsed.tv,
+      radio: parsed.radio,
+      newspaper: parsed.newspaper,
+      price_per_unit: parsed.pricePerUnit,
+    };
+
+  setStatus("loading");
+  setResult(null);
+  setLastDuration(null);
+  const start = typeof performance !== "undefined" ? performance.now() : Date.now();
+
+    try {
+      let unitsK: number;
+      let roiFraction: number | null = null;
+      let latestMetrics: Metrics | null = null;
+
+      if (mode === "server") {
+        const prediction = await requestServer("/predict/channels", payload);
+        const predictedValue = Number(prediction.predicted_k);
+        if (!Number.isFinite(predictedValue)) {
+          throw new Error("Server response did not include a valid prediction");
+        }
+        unitsK = predictedValue;
+        latestMetrics = normalizeMetrics(prediction.metrics);
+
+        if (predictROI) {
+          const roiResponse = await requestServer("/predict/roi/channels", payload);
+          if (typeof roiResponse.predicted_roi === "number") {
+            roiFraction = roiResponse.predicted_roi;
+          } else if (typeof roiResponse.predicted_roi_pct === "number") {
+            roiFraction = roiResponse.predicted_roi_pct / 100;
+          }
+        }
+      } else {
+        const pred = predictFromChannels(parsed.tv, parsed.radio, parsed.newspaper, true);
+        const predictedValue = Number(pred);
+        if (!Number.isFinite(predictedValue)) {
+          throw new Error("Local model returned an invalid prediction");
+        }
+        unitsK = predictedValue;
+        roiFraction = null;
+        try {
+          latestMetrics = normalizeMetrics(getModelMetrics());
+        } catch (err) {
+          console.warn("Unable to read client metrics", err);
+        }
+      }
+
+      const roi = computeClientROI(unitsK, parsed.pricePerUnit, parsed.tv + parsed.radio + parsed.newspaper);
+      const finalRoi = roiFraction ?? roi.roiFraction ?? null;
+      setMetrics(latestMetrics);
+      setResult({
+        unitsK,
+        roiFraction: finalRoi,
+        revenue: roi.revenue,
+        expense: roi.expense,
+        units: roi.units,
+        channelSpend: { tv: parsed.tv, radio: parsed.radio, newspaper: parsed.newspaper },
+      });
+  const end = typeof performance !== "undefined" ? performance.now() : Date.now();
+  setStatus("success");
+  setLastDuration((end - start) / 1000);
+      toast.success("Prediction complete");
+    } catch (err) {
+      console.error(err);
+      setStatus("error");
+      toast.error(err instanceof Error ? err.message : "Prediction failed");
+    }
+  };
+
+  const resetForm = () => {
+    setFormValues(DEFAULT_VALUES);
+    setResult(null);
+    setErrors({});
+    setStatus("idle");
+    setProgressValue(0);
+    setPredictROI(false);
+  };
+
+  const predictedUnits = result?.unitsK ?? null;
+  const roiPercent = result?.roiFraction != null ? result.roiFraction * 100 : null;
+
+  const statBlocks = [
+    {
+      label: "Predicted Sales",
+      value: predictedUnits != null ? `${predictedUnits.toFixed(2)}k` : "—",
+      helper: predictedUnits != null ? `${numberFmt((predictedUnits ?? 0) * 1000, 0)} units` : "Awaiting run",
+    },
+    {
+      label: "Projected Revenue",
+      value: result ? currency(result.revenue, 0) : "—",
+      helper: result ? `Expense: ${currency(result.expense, 0)}` : "Tied to your spend",
+    },
+    {
+      label: "ROI",
+      value: roiPercent != null ? `${roiPercent.toFixed(1)}%` : "—",
+      helper: roiPercent != null ? "Server ROI" : "Local ROI estimate",
+    },
+  ];
+
   return (
-    <section className="relative py-24 px-4 bg-gradient-to-b from-card/20 to-background">
+    <section className="relative py-24 px-4 bg-gradient-to-b from-card/10 to-background">
       <div className="max-w-7xl mx-auto">
-  <div className="grid grid-cols-1 lg:grid-cols-2 gap-8 items-stretch">
-          {/* Input Section */}
-          <Card className="bg-card/50 border-2 border-primary/30 backdrop-blur-sm p-8 h-full">
-            <div className="mb-6">
-              <div className="flex items-center gap-2 mb-2">
-                <TrendingUp className="w-6 h-6 text-accent" />
-                <h3 className="text-2xl font-bold text-accent font-mono">&gt; Campaign Input</h3>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
+          <Card className="h-full bg-card/60 border-primary/20 border backdrop-blur">
+            <div className="flex items-center gap-3 border-b border-border/50 px-8 py-6">
+              <TrendingUp className="w-6 h-6 text-primary" />
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-[0.25em] font-mono">
+                  Campaign inputs
+                </p>
+                <h3 className="text-2xl font-semibold">Allocate your budget</h3>
               </div>
-              <p className="text-xs text-muted-foreground font-mono">
-                // Enter marketing campaign budget
-              </p>
             </div>
 
-            <div className="space-y-6">
-              <div>
-                <Label className="text-primary font-mono text-sm mb-3 block">&gt;&gt; Channel Expenses ($)</Label>
-                <div className="grid grid-cols-12 gap-2 items-center">
-                  <div className="col-span-4">
-                    <Label htmlFor="tv" className="text-xs text-muted-foreground font-mono mb-2">TV</Label>
-                    <Input id="tv" type="number" value={tvAmount} onChange={(e) => setTvAmount(e.target.value)} className="w-full bg-background border-2 border-primary/50 text-foreground font-mono text-lg h-12" />
+            <div className="p-8 space-y-8">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {(Object.keys(CHANNEL_LABELS) as ChannelKey[]).map((key) => (
+                  <div key={key} className="space-y-2">
+                    <Label htmlFor={key} className="text-xs text-muted-foreground font-semibold">
+                      {CHANNEL_LABELS[key]}
+                    </Label>
+                    <Input
+                      id={key}
+                      type="number"
+                      inputMode="decimal"
+                      value={formValues[key]}
+                      onChange={(event) => handleFieldChange(key, event.target.value)}
+                      className={cn(
+                        "h-12 font-mono",
+                        errors[key] ? "border-destructive focus-visible:ring-destructive" : "",
+                      )}
+                    />
+                    {errors[key] && (
+                      <p className="text-xs text-destructive">{errors[key]}</p>
+                    )}
                   </div>
-                  <div className="col-span-4">
-                    <Label htmlFor="radio" className="text-xs text-muted-foreground font-mono mb-2">Radio</Label>
-                    <Input id="radio" type="number" value={radioAmount} onChange={(e) => setRadioAmount(e.target.value)} className="w-full bg-background border-2 border-primary/50 text-foreground font-mono text-lg h-12" />
-                  </div>
-                  <div className="col-span-4">
-                    <Label htmlFor="newspaper" className="text-xs text-muted-foreground font-mono mb-2">Newspaper</Label>
-                    <Input id="newspaper" type="number" value={newspaperAmount} onChange={(e) => setNewspaperAmount(e.target.value)} className="w-full bg-background border-2 border-primary/50 text-foreground font-mono text-lg h-12" />
-                  </div>
+                ))}
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-4">
+                <div className="space-y-2">
+                  <Label htmlFor="pricePerUnit" className="text-xs text-muted-foreground font-semibold">
+                    Price per unit ($)
+                  </Label>
+                  <Input
+                    id="pricePerUnit"
+                    type="number"
+                    inputMode="decimal"
+                    value={formValues.pricePerUnit}
+                    onChange={(event) => handleFieldChange("pricePerUnit", event.target.value)}
+                    className={cn(
+                      "h-12 font-mono",
+                      errors.pricePerUnit ? "border-destructive focus-visible:ring-destructive" : "",
+                    )}
+                  />
+                  {errors.pricePerUnit && (
+                    <p className="text-xs text-destructive">{errors.pricePerUnit}</p>
+                  )}
                 </div>
 
-                <div className="grid grid-cols-12 gap-2 items-center mt-3">
-                  <div className="col-span-8">
-                    <p className="text-xs text-muted-foreground font-mono">Enter channel-level budgets in dollars. Values will be scaled to dataset units (thousands) automatically.</p>
+                <div className="space-y-2">
+                  <Label className="text-xs text-muted-foreground font-semibold">Mode</Label>
+                  <div className="grid grid-cols-2 gap-2">
+                    {["local", "server"].map((option) => (
+                      <Button
+                        key={option}
+                        type="button"
+                        variant={mode === option ? "default" : "outline"}
+                        className="h-12"
+                        onClick={() => handleModeChange(option as ModeOption)}
+                      >
+                        {option === "local" ? "Local" : "Server"}
+                      </Button>
+                    ))}
                   </div>
-                  <div className="col-span-4">
-                    <label className="sr-only">Model</label>
-                    <select value={useServer ? 'server' : 'local'} onChange={(e) => setUseServer(e.target.value === 'server')}
-                      className="w-full h-12 bg-card/50 border-2 border-primary/50 text-foreground font-mono px-3">
-                      <option value="local">Local (Linear)</option>
-                      <option value="server">Server (RandomForest)</option>
-                    </select>
-                  </div>
-                </div>
-
-                <div className="mt-2 text-xs text-muted-foreground font-mono">
-                  Entered total: ${Number((parseFloat(tvAmount || '0') + parseFloat(radioAmount || '0') + parseFloat(newspaperAmount || '0')) || 0).toLocaleString()}
                 </div>
               </div>
 
-              <Button
-                onClick={handlePredict}
-                disabled={isLoading}
-                className="w-full h-14 text-lg font-mono bg-primary hover:bg-primary/80 text-primary-foreground border-2 border-primary transition-all hover:shadow-[0_0_20px_rgba(0,255,255,0.5)]"
-              >
-                {isLoading ? (
-                  <>
-                    <Loader2 className="w-5 h-5 mr-2 animate-spin" />
-                    PROCESSING...
-                  </>
-                ) : (
-                  "&gt;&gt; Execute Prediction"
-                )}
-              </Button>
+              <div className="flex flex-col gap-3 border border-border/50 rounded-lg p-4">
+                <div className="flex items-start justify-between gap-4">
+                  <div>
+                    <p className="text-sm font-medium">Use ROI model</p>
+                    <p className="text-xs text-muted-foreground">
+                      Server-side ROI predictions include ensemble adjustments.
+                    </p>
+                  </div>
+                  <Switch
+                    checked={predictROI}
+                    onCheckedChange={(checked) => setPredictROI(Boolean(checked))}
+                    disabled={mode === "local"}
+                  />
+                </div>
+                <p className="text-xs font-mono text-muted-foreground">
+                  Total spend: ${numberFmt(totalExpense, 0)}
+                </p>
+              </div>
 
-              {prediction && (
-                <div className="mt-6 p-6 border-2 border-accent bg-accent/10 animate-fade-in">
-                  <div className="text-sm text-accent font-mono mb-2">
-                    &gt;&gt; PREDICTED SALES
+              {status === "loading" && (
+                <div className="space-y-2">
+                  <div className="flex items-center gap-2 text-xs uppercase tracking-[0.3em] text-primary">
+                    <Loader2 className="w-4 h-4 animate-spin" /> calibrating ensemble
                   </div>
-                  <div className="text-4xl font-bold text-accent font-mono">
-                    {prediction !== null ? `${prediction.toFixed(2)}k units` : '—'}
-                  </div>
-                  <div className="mt-3 text-sm text-muted-foreground font-mono">
-                    {prediction !== null && (
-                      <>
-                        (~{Math.round(prediction * 1000).toLocaleString()} units)
-                        <br />
-                        R² — Linear: {metrics?.linear?.r2 != null ? metrics.linear.r2.toFixed(3) : metrics?.r2 != null ? metrics.r2.toFixed(3) : 'N/A'}; RF: {metrics?.random_forest?.r2 != null ? metrics.random_forest.r2.toFixed(3) : 'N/A'}
-                        <br />
-                        F1 — Linear: {metrics?.linear?.f1 != null ? Number(metrics.linear.f1).toFixed(3) : metrics?.f1 != null ? Number(metrics.f1).toFixed(3) : 'N/A'}; RF: {metrics?.random_forest?.f1 != null ? Number(metrics.random_forest.f1).toFixed(3) : 'N/A'}
-                      </>
-                    )}
-                  </div>
+                  <Progress value={progressValue} className="h-2" />
                 </div>
               )}
+
+              <div className="flex flex-col sm:flex-row gap-3">
+                <Button
+                  onClick={handlePredict}
+                  disabled={status === "loading"}
+                  className="flex-1 h-12 text-lg font-semibold"
+                >
+                  {status === "loading" ? (
+                    <span className="flex items-center gap-2">
+                      <Loader2 className="w-4 h-4 animate-spin" /> Running
+                    </span>
+                  ) : (
+                    "Run prediction"
+                  )}
+                </Button>
+                <Button type="button" variant="ghost" onClick={resetForm} disabled={status === "loading"}>
+                  Reset
+                </Button>
+              </div>
             </div>
           </Card>
 
-          {/* Visualization/Info Section */}
-          <Card className="bg-card/50 border-2 border-primary/30 backdrop-blur-sm p-8 flex items-center justify-center h-full">
-            <div className="text-center">
-              {!prediction && !isLoading && (
-                <div className="space-y-6">
-                  <div className="w-full h-48 bg-primary/10 border-2 border-primary/30 flex items-center justify-center">
-                    <div className="text-center">
-                      <div className="text-6xl text-primary mb-4 font-mono">&gt;_</div>
-                      <div className="text-primary text-xl font-mono font-bold">
-                        INITIALIZE PREDICTION SYSTEM
-                      </div>
-                    </div>
+          <Card className="h-full bg-card/60 border-primary/20 border backdrop-blur">
+            <div className="flex items-center gap-3 border-b border-border/50 px-8 py-6">
+              <Sparkles className="w-6 h-6 text-secondary" />
+              <div>
+                <p className="text-xs text-muted-foreground uppercase tracking-[0.25em] font-mono">
+                  Insights
+                </p>
+                <h3 className="text-2xl font-semibold">Live prediction dashboard</h3>
+              </div>
+            </div>
+
+            <div className="p-8 space-y-8">
+              <div className="grid grid-cols-1 sm:grid-cols-3 gap-4">
+                {statBlocks.map((stat) => (
+                  <div key={stat.label} className="rounded-xl border border-border/60 bg-card/40 p-4 space-y-1">
+                    <p className="text-xs text-muted-foreground uppercase tracking-widest">{stat.label}</p>
+                    <p className="text-2xl font-semibold">{stat.value}</p>
+                    <p className="text-xs text-muted-foreground">{stat.helper}</p>
                   </div>
-                  <p className="text-sm text-muted-foreground font-mono">
-                        {prediction !== null && (
-                          <>
-                            (~{Math.round(prediction * 1000).toLocaleString()} units)
-                            <br />
-                            Confidence: {metrics?.r2 != null ? `${Math.round(metrics.r2 * 100)}%` : 'N/A'} // Model: Linear Regression
-                          </>
-                        )}
-                        {predictedROI !== null && (
-                          <>
-                            Predicted ROI: {`${(predictedROI * 100).toFixed(1)}%`}
-                            <br />
-                            R² — Linear: {metrics?.linear?.r2 != null ? metrics.linear.r2.toFixed(3) : metrics?.r2 != null ? metrics.r2.toFixed(3) : 'N/A'}; RF: {metrics?.random_forest?.r2 != null ? metrics.random_forest.r2.toFixed(3) : 'N/A'}
-                            <br />
-                            F1 — Linear: {metrics?.linear?.f1 != null ? Number(metrics.linear.f1).toFixed(3) : metrics?.f1 != null ? Number(metrics.f1).toFixed(3) : 'N/A'}; RF: {metrics?.random_forest?.f1 != null ? Number(metrics.random_forest.f1).toFixed(3) : 'N/A'}
-                          </>
-                        )}
-                  </p>
-                  <div className="w-full h-48 bg-primary/10 border-2 border-primary/30 flex items-center justify-center">
-                    <div className="text-center">
-                      <Loader2 className="w-16 h-16 text-primary animate-spin mx-auto mb-4" />
-                      <div className="text-primary text-xl font-mono font-bold">
-                        COMPUTING PREDICTION...
-                      </div>
-                      <div className="text-xs text-muted-foreground font-mono mt-2">
-                        Analyzing model parameters
-                      </div>
-                    </div>
+                ))}
+              </div>
+
+              <div className="rounded-2xl border border-border/60 p-5 bg-background/40">
+                <div className="flex items-center gap-2 mb-4">
+                  <ActivitySquare className="w-4 h-4 text-primary" />
+                  <p className="text-sm font-semibold">Channel insight</p>
+                </div>
+                <ChartContainer config={chartConfig} className="w-full min-h-[260px]">
+                  <BarChart data={chartData} margin={{ left: 0, right: 0, top: 10, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" vertical={false} />
+                    <XAxis dataKey="channel" tickLine={false} axisLine={false} />
+                    <YAxis yAxisId="left" tickLine={false} axisLine={false} width={40} />
+                    <YAxis yAxisId="right" orientation="right" hide />
+                    <ChartTooltip content={<ChartTooltipContent />} />
+                    <Bar dataKey="spend" yAxisId="left" fill="var(--color-spend)" radius={[6, 6, 0, 0]} />
+                    <Bar dataKey="impact" yAxisId="right" fill="var(--color-impact)" radius={[6, 6, 0, 0]} />
+                  </BarChart>
+                </ChartContainer>
+                <p className="text-xs text-muted-foreground mt-3">
+                  Impact uses the current linear coefficients to approximate marginal lift per channel.
+                </p>
+              </div>
+
+              <div className="rounded-2xl border border-border/60 p-5 bg-background/40 space-y-4">
+                <div className="flex flex-wrap items-center justify-between gap-3">
+                  <div>
+                    <p className="text-sm font-semibold">Model telemetry</p>
+                    <p className="text-xs text-muted-foreground">Fresh metrics from the selected engine.</p>
+                  </div>
+                  {lastDuration && (
+                    <span className="text-xs text-muted-foreground font-mono">{lastDuration.toFixed(2)}s</span>
+                  )}
+                </div>
+                <div className="grid grid-cols-2 gap-4 text-sm">
+                  <div>
+                    <p className="text-muted-foreground text-xs uppercase">R²</p>
+                    <p className="text-lg font-semibold">{metrics?.test_r2?.toFixed(3) ?? metrics?.r2?.toFixed(3) ?? "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-xs uppercase">RMSE</p>
+                    <p className="text-lg font-semibold">{metrics?.test_rmse?.toFixed(2) ?? metrics?.rmse?.toFixed(2) ?? "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-xs uppercase">MAE</p>
+                    <p className="text-lg font-semibold">{metrics?.mae?.toFixed(2) ?? "—"}</p>
+                  </div>
+                  <div>
+                    <p className="text-muted-foreground text-xs uppercase">Rel. RMSE</p>
+                    <p className="text-lg font-semibold">
+                      {metrics?.rel_rmse_pct != null ? `${metrics.rel_rmse_pct.toFixed(1)}%` : "—"}
+                    </p>
                   </div>
                 </div>
-              )}
+              </div>
 
-              {prediction && !isLoading && (
-                <div className="space-y-6 animate-fade-in">
-                  <div className="w-full p-8 bg-accent/10 border-2 border-accent">
-                    <div className="text-6xl font-bold text-accent font-mono mb-4">
-                      ✓
-                    </div>
-                    <div className="text-2xl text-accent font-mono font-bold mb-2">
-                      PREDICTION COMPLETE
-                    </div>
-                    <div className="text-sm text-muted-foreground font-mono">
-                      Model confidence: 94% // Execution time: 1.2s
-                    </div>
-                  </div>
-                  <div className="grid grid-cols-2 gap-4 text-left">
-                    <div className="border border-primary/30 bg-card/30 p-4">
-                      <div className="text-xs text-primary font-mono mb-1">ROI</div>
-                        <div className="text-sm text-muted-foreground font-mono mb-2">ROI (using default price per unit)</div>
-                        <div className="text-xl font-bold text-foreground font-mono">
-                          {(() => {
-                            const expenseNum = (parseFloat(tvAmount || '0') + parseFloat(radioAmount || '0') + parseFloat(newspaperAmount || '0')) || 0;
-                            const priceNum = DEFAULT_PRICE_PER_UNIT;
-                            if (!prediction || isNaN(expenseNum) || expenseNum <= 0) return 'N/A';
-                            // prediction is in thousands of units; convert to units
-                            const units = (prediction ?? 0) * 1000;
-                            const revenue = units * priceNum;
-                            const roi = ((revenue - expenseNum) / expenseNum) * 100;
-                            return `${roi.toFixed(1)}%`;
-                          })()}
-                        </div>
-                    </div>
-                    <div className="border border-primary/30 bg-card/30 p-4">
-                        <div className="text-xs text-primary font-mono mb-1">RMSE</div>
-                        <div className="text-sm text-muted-foreground font-mono mb-2">Absolute / Relative</div>
-                        <div className="text-xl font-bold text-foreground font-mono">
-                          {metrics ? (
-                            (() => {
-                              const rmse = metrics.rmse ?? metrics.linear?.rmse ?? metrics.random_forest?.rmse;
-                              const rel = metrics.rel_rmse_pct ?? metrics.linear?.rel_rmse_pct ?? metrics.random_forest?.rel_rmse_pct;
-                              if (rmse != null) return `${Number(rmse).toFixed(2)} (±${rel != null ? Number(rel).toFixed(1) + '%' : 'N/A'})`;
-                              return 'N/A';
-                            })()
-                          ) : 'N/A'}
-                        </div>
-                    </div>
-                  </div>
+              {!result && status === "idle" && (
+                <div className="rounded-2xl border border-dashed border-border/60 p-6 text-center text-sm text-muted-foreground">
+                  Run a prediction to view ROI, revenue, and per-channel diagnostics.
                 </div>
               )}
             </div>
           </Card>
         </div>
 
-        {/* Info banner */}
-        <div className="mt-8 p-4 border-2 border-secondary/30 bg-card/30 backdrop-blur-sm">
-          <div className="flex items-center justify-center gap-2 text-sm font-mono">
-            <span className="w-2 h-2 bg-secondary animate-pulse-glow" />
-            <span className="text-secondary">REAL-TIME PREDICTION ENGINE</span>
-            <span className="text-muted-foreground">// POWERED BY MACHINE LEARNING</span>
-          </div>
+        <div className="mt-8 p-4 border border-dashed border-border/50 rounded-xl text-center text-xs font-mono text-muted-foreground uppercase tracking-[0.4em]">
+          Real-time prediction engine // Powered by FastAPI + Vite
         </div>
       </div>
     </section>

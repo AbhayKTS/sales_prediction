@@ -1,10 +1,10 @@
 [build]
-command = "npm ci && npm run build"
-publish = "dist"
+command = "cd src/frontend && npm ci && npm run build"
+publish = "src/frontend/dist"
 
 # Local dev runner: Netlify CLI will run this and proxy to it.
 [dev]
-command = "npm run dev"
+command = "cd src/frontend && npm run dev"
 # Vite default port
 targetPort = 5173
 # Netlify dev UI port

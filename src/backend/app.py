@@ -1,19 +1,22 @@
+"""FastAPI application exposing campaign sales prediction endpoints."""
+
 from pathlib import Path
-from typing import List, Optional
+from typing import Dict, List, Optional
 
 import json
 
 import joblib  # type: ignore
 import numpy as np  # type: ignore
 import pandas as pd  # type: ignore
-from fastapi import FastAPI  # type: ignore
+from fastapi import FastAPI, HTTPException  # type: ignore
 from fastapi.middleware.cors import CORSMiddleware  # type: ignore
 from pydantic import BaseModel  # type: ignore
 
 
-ROOT = Path(__file__).resolve().parents[1]
-PUBLIC = ROOT / "public"
-METRICS_PATH = PUBLIC / "model-coefs.json"
+REPO_ROOT = Path(__file__).resolve().parents[2]
+FRONTEND_PUBLIC = REPO_ROOT / "src" / "frontend" / "public"
+MODELS_DIR = REPO_ROOT / "models" / "artifacts"
+METRICS_PATH = FRONTEND_PUBLIC / "model-coefs.json"
 FEATURES = ["TV", "Radio", "Newspaper"]
 
 
@@ -58,10 +61,10 @@ def load_metrics(path: Path):
 def resolve_model_path(metrics: dict) -> Path:
     preferred = metrics.get("best_model")
     if preferred:
-        candidate = PUBLIC / "models" / f"{preferred}.joblib"
+        candidate = MODELS_DIR / f"{preferred}.joblib"
         if candidate.exists():
             return candidate
-    return PUBLIC / "models" / "random_forest.joblib"
+    return MODELS_DIR / "random_forest.joblib"
 
 
 @app.on_event("startup")
@@ -78,12 +81,54 @@ def startup_event():
     # try loading ROI models if present
     global ROI_MODEL
     ROI_MODEL = None
-    roi_path = PUBLIC / 'models' / 'random_forest_roi.joblib'
+    roi_path = MODELS_DIR / 'random_forest_roi.joblib'
     if roi_path.exists():
         try:
             ROI_MODEL = load_model(roi_path)
         except Exception:
             ROI_MODEL = None
+
+    # If a binary-scikit model couldn't be loaded (scikit-learn not installed),
+    # attempt to fall back to a lightweight linear predictor using precomputed
+    # coefficients placed in `model-coefs.json` under the frontend public folder.
+    try:
+        # METRICS may already contain intercept/betas when the JSON is the coefs file
+        coefs = None
+        if isinstance(METRICS, dict):
+            # support nested shapes { intercept, betas, channelShares, metrics }
+            if "intercept" in METRICS and "betas" in METRICS:
+                coefs = METRICS
+            elif "metrics" in METRICS and isinstance(METRICS.get("metrics"), dict):
+                inner = METRICS.get("metrics")
+                if "intercept" in inner and "betas" in inner:
+                    coefs = {**inner, **{k: METRICS.get(k) for k in ("channelShares",)}}
+
+        if MODEL is None and coefs is not None:
+            # create a tiny wrapper with predict(df) to mimic sklearn API
+            class LinearWrapper:
+                def __init__(self, intercept: float, betas):
+                    self.intercept = float(intercept)
+                    self.betas = [float(b) for b in betas]
+
+                def predict(self, df):
+                    # expects pandas DataFrame with columns ['TV','Radio','Newspaper'] in training units (k)
+                    try:
+                        arr = [self.intercept + self.betas[0] * float(df['TV'].iloc[0])
+                               + self.betas[1] * float(df['Radio'].iloc[0])
+                               + self.betas[2] * float(df['Newspaper'].iloc[0])]
+                        import numpy as _np
+
+                        return _np.array(arr)
+                    except Exception:
+                        raise
+
+            try:
+                MODEL = LinearWrapper(coefs.get("intercept"), coefs.get("betas"))
+            except Exception:
+                MODEL = None
+    except Exception:
+        # non-fatal: keep MODEL as-is
+        pass
 
 
 def to_model_input(tv: float, radio: float, newspaper: float) -> pd.DataFrame:

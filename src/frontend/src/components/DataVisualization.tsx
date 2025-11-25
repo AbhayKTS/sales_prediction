@@ -14,6 +14,20 @@ const data = [
   { expense: 200000, actual: 695000, predicted: 698000 },
 ];
 
+const formatMetricValue = (value: number | null | undefined, digits = 2, suffix = "") => {
+  if (value == null || Number.isNaN(value) || !Number.isFinite(value)) {
+    return "N/A";
+  }
+  return `${value.toFixed(digits)}${suffix}`;
+};
+
+const formatPercentValue = (value: number | null | undefined) => {
+  if (value == null || Number.isNaN(value) || !Number.isFinite(value)) {
+    return null;
+  }
+  return `${value.toFixed(1)}%`;
+};
+
 const CustomTooltip = ({ active, payload }: any) => {
   if (active && payload && payload.length) {
     return (
@@ -46,19 +60,21 @@ const DataVisualization = () => {
     return () => { mounted = false; };
   }, []);
 
-  function fmtPct(n: number | null | undefined) {
-    if (n == null || !isFinite(n)) return 'N/A';
-    return `${Number(n).toFixed(1)}%`;
-  }
-
-  // Compute relative MAE% if possible
-  const relRmse = metrics?.rel_rmse_pct ?? null;
-  const relMae = (() => {
-    const mae = metrics?.mae ?? null;
-    const mean = metrics?.meanSales ?? metrics?.mean_sales ?? metrics?.mean_sales_test ?? null;
-    if (mae != null && mean != null && mean !== 0) return (mae / mean) * 100;
-    return null;
-  })();
+  const metricSource = metrics?.linear ?? metrics ?? null;
+  const r2Value = metricSource?.test_r2 ?? metricSource?.r2 ?? null;
+  const rmseValue = metricSource?.test_rmse ?? metricSource?.rmse ?? null;
+  const maeValue = metricSource?.test_mae ?? metricSource?.mae ?? null;
+  const relRmse = metricSource?.rel_rmse_pct ?? metrics?.rel_rmse_pct ?? null;
+  const meanSales =
+    metricSource?.meanSales ??
+    metricSource?.mean_sales ??
+    metrics?.meanSales ??
+    metrics?.mean_sales ??
+    metrics?.mean_sales_test ??
+    null;
+  const relMae = maeValue != null && meanSales ? (maeValue / meanSales) * 100 : null;
+  const relRmseLabel = formatPercentValue(relRmse);
+  const relMaeLabel = formatPercentValue(relMae);
   return (
     <section className="relative py-24 px-4 bg-gradient-to-b from-background to-card/20">
       <div className="max-w-7xl mx-auto">
@@ -140,7 +156,7 @@ const DataVisualization = () => {
                     // Coefficient of determination
                   </p>
                 </div>
-                <div className="text-3xl font-bold text-primary font-mono">0.94</div>
+                <div className="text-3xl font-bold text-primary font-mono">{formatMetricValue(r2Value, 3)}</div>
               </div>
             </Card>
 
@@ -157,9 +173,12 @@ const DataVisualization = () => {
                   </p>
                 </div>
                 <div className="text-3xl font-bold text-accent font-mono">
-                  {fmtPct(relRmse)}
+                  {formatMetricValue(rmseValue, 2, "k")}
                 </div>
               </div>
+              <p className="text-[11px] text-muted-foreground font-mono mt-2">
+                {relRmseLabel ? `${relRmseLabel} of avg sales` : `// Root Mean Squared Error`}
+              </p>
             </Card>
 
             {/* MAE */}
@@ -174,8 +193,11 @@ const DataVisualization = () => {
                     // Mean Absolute Error
                   </p>
                 </div>
-                <div className="text-3xl font-bold text-primary font-mono">{fmtPct(relMae)}</div>
+                <div className="text-3xl font-bold text-primary font-mono">{formatMetricValue(maeValue, 2, "k")}</div>
               </div>
+              <p className="text-[11px] text-muted-foreground font-mono mt-2">
+                {relMaeLabel ? `${relMaeLabel} of avg sales` : `// Mean Absolute Error`}
+              </p>
             </Card>
           </div>
         </div>
