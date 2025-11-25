@@ -1,0 +1,144 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* Definition of the design system. All colors, gradients, fonts, etc should be defined here. 
+All colors MUST be HSL.
+*/
+
+@layer base {
+  :root {
+    --background: 0 0% 5%;
+    --foreground: 180 100% 90%;
+
+    --card: 0 0% 8%;
+    --card-foreground: 180 100% 90%;
+
+    --popover: 0 0% 8%;
+    --popover-foreground: 180 100% 90%;
+
+    --primary: 180 100% 50%;
+    --primary-foreground: 0 0% 5%;
+
+    --secondary: 45 100% 50%;
+    --secondary-foreground: 0 0% 5%;
+
+    --muted: 0 0% 15%;
+    --muted-foreground: 180 50% 60%;
+
+    --accent: 180 100% 50%;
+    --accent-foreground: 0 0% 5%;
+
+    --destructive: 0 84.2% 60.2%;
+    --destructive-foreground: 210 40% 98%;
+
+    --border: 180 100% 30%;
+    --input: 180 100% 20%;
+    --ring: 180 100% 50%;
+
+    --radius: 0.25rem;
+
+    /* Custom cyberpunk colors */
+    --cyber-cyan: 180 100% 50%;
+    --cyber-yellow: 45 100% 50%;
+    --cyber-dark: 0 0% 5%;
+    --cyber-glow: 180 100% 50%;
+    
+    /* Gradients */
+    --gradient-cyber: linear-gradient(135deg, hsl(180 100% 50% / 0.2), hsl(45 100% 50% / 0.2));
+    
+    /* Shadows */
+    --shadow-cyan: 0 0 20px hsl(180 100% 50% / 0.5);
+    --shadow-yellow: 0 0 20px hsl(45 100% 50% / 0.5);
+    
+    /* Animations */
+    --transition-glow: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+
+  body {
+    @apply bg-background text-foreground;
+    font-family: 'Courier New', monospace;
+  }
+
+  /* Cyberpunk animations */
+  @keyframes glitch {
+    0% {
+      text-shadow: 2px 2px hsl(var(--cyber-cyan)), -2px -2px hsl(var(--cyber-yellow));
+    }
+    25% {
+      text-shadow: -2px 2px hsl(var(--cyber-yellow)), 2px -2px hsl(var(--cyber-cyan));
+    }
+    50% {
+      text-shadow: 2px -2px hsl(var(--cyber-cyan)), -2px 2px hsl(var(--cyber-yellow));
+    }
+    75% {
+      text-shadow: -2px -2px hsl(var(--cyber-yellow)), 2px 2px hsl(var(--cyber-cyan));
+    }
+    100% {
+      text-shadow: 2px 2px hsl(var(--cyber-cyan)), -2px -2px hsl(var(--cyber-yellow));
+    }
+  }
+
+  @keyframes pulse-glow {
+    0%, 100% {
+      box-shadow: 0 0 5px hsl(var(--cyber-cyan)), 0 0 10px hsl(var(--cyber-cyan));
+    }
+    50% {
+      box-shadow: 0 0 10px hsl(var(--cyber-cyan)), 0 0 20px hsl(var(--cyber-cyan));
+    }
+  }
+
+  @keyframes scan-line {
+    0% {
+      transform: translateY(-100%);
+    }
+    100% {
+      transform: translateY(100vh);
+    }
+  }
+
+  .glitch-text {
+    animation: glitch 3s infinite;
+  }
+
+  .glow-cyan {
+    box-shadow: 0 0 10px hsl(var(--cyber-cyan)), 0 0 20px hsl(var(--cyber-cyan) / 0.5);
+  }
+
+  .glow-yellow {
+    box-shadow: 0 0 10px hsl(var(--cyber-yellow)), 0 0 20px hsl(var(--cyber-yellow) / 0.5);
+  }
+
+  .corner-border {
+    position: relative;
+  }
+
+  .corner-border::before,
+  .corner-border::after {
+    content: '';
+    position: absolute;
+    width: 20px;
+    height: 20px;
+    border: 2px solid hsl(var(--cyber-cyan));
+  }
+
+  .corner-border::before {
+    top: 0;
+    left: 0;
+    border-right: none;
+    border-bottom: none;
+  }
+
+  .corner-border::after {
+    bottom: 0;
+    right: 0;
+    border-left: none;
+    border-top: none;
+  }
+}

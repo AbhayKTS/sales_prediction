@@ -1,0 +1,216 @@
+from pathlib import Path
+from typing import List, Optional
+
+import json
+
+import joblib  # type: ignore
+import numpy as np  # type: ignore
+import pandas as pd  # type: ignore
+from fastapi import FastAPI  # type: ignore
+from fastapi.middleware.cors import CORSMiddleware  # type: ignore
+from pydantic import BaseModel  # type: ignore
+
+
+ROOT = Path(__file__).resolve().parents[1]
+PUBLIC = ROOT / "public"
+METRICS_PATH = PUBLIC / "model-coefs.json"
+FEATURES = ["TV", "Radio", "Newspaper"]
+
+
+class ChannelsInput(BaseModel):
+    tv: float
+    radio: float
+    newspaper: float
+    price_per_unit: Optional[float] = 10.0
+
+
+class TotalInput(BaseModel):
+    total: float
+    shares: Optional[List[float]] = None
+    price_per_unit: Optional[float] = 10.0
+
+
+app = FastAPI(title="Campaign Sales Prediction API")
+
+# Allow the default Vite dev origin and localhost
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["http://localhost:5173", "http://127.0.0.1:5173", "*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
+)
+
+
+def load_model(path: Path):
+    if not path.exists():
+        raise FileNotFoundError(f"Model file not found: {path}")
+    return joblib.load(path)
+
+
+def load_metrics(path: Path):
+    if not path.exists():
+        return {}
+    with open(path, "r", encoding="utf-8") as f:
+        return json.load(f)
+
+
+def resolve_model_path(metrics: dict) -> Path:
+    preferred = metrics.get("best_model")
+    if preferred:
+        candidate = PUBLIC / "models" / f"{preferred}.joblib"
+        if candidate.exists():
+            return candidate
+    return PUBLIC / "models" / "random_forest.joblib"
+
+
+@app.on_event("startup")
+def startup_event():
+    global MODEL, METRICS
+    MODEL = None
+    METRICS = load_metrics(METRICS_PATH)
+    model_path = resolve_model_path(METRICS)
+    try:
+        MODEL = load_model(model_path)
+    except Exception:
+        # keep MODEL as None; endpoints will return a helpful error
+        MODEL = None
+    # try loading ROI models if present
+    global ROI_MODEL
+    ROI_MODEL = None
+    roi_path = PUBLIC / 'models' / 'random_forest_roi.joblib'
+    if roi_path.exists():
+        try:
+            ROI_MODEL = load_model(roi_path)
+        except Exception:
+            ROI_MODEL = None
+
+
+def to_model_input(tv: float, radio: float, newspaper: float) -> pd.DataFrame:
+    # The frontend and training scripts use units where spend is in thousands.
+    # Convert dollar inputs into training units (divide by 1000).
+    data = {
+        "TV": [tv / 1000.0],
+        "Radio": [radio / 1000.0],
+        "Newspaper": [newspaper / 1000.0],
+    }
+    return pd.DataFrame(data, columns=FEATURES)
+
+
+def compute_roi(pred_k: float, price_per_unit: float, expense: float):
+    # pred_k is in "k units" (same as training Sales units). Convert to units.
+    units = float(pred_k) * 1000.0
+    revenue = units * float(price_per_unit)
+    expense = float(expense)
+    if expense == 0:
+        roi = None
+    else:
+        roi = (revenue - expense) / expense
+    return {"units": units, "revenue": revenue, "expense": expense, "roi": roi}
+
+
+@app.post("/predict/roi/channels")
+def predict_roi_channels(inp: ChannelsInput):
+    """Predict ROI directly using a server-side ROI model if available.
+    Returns roi as a fraction (e.g. 2.61 = 261%)."""
+    if ROI_MODEL is None:
+        return {"error": "ROI model not available on server. Train and save random_forest_roi.joblib."}
+
+    tv = inp.tv
+    radio = inp.radio
+    newspaper = inp.newspaper
+    X = to_model_input(tv, radio, newspaper)
+    pred_roi = ROI_MODEL.predict(X)
+    pred_val = float(pred_roi[0])
+    metrics = METRICS.get("metrics", METRICS)
+    return {"predicted_roi": pred_val, "predicted_roi_pct": pred_val * 100.0, "metrics": metrics}
+
+
+@app.post("/predict/roi/total")
+def predict_roi_total(inp: TotalInput):
+    if ROI_MODEL is None:
+        return {"error": "ROI model not available on server. Train and save random_forest_roi.joblib."}
+
+    total = inp.total
+    shares = inp.shares
+    if shares and len(shares) == 3:
+        s = np.array(shares, dtype=float)
+        if s.sum() > 0:
+            s = s / s.sum()
+        tv = float(total) * float(s[0])
+        radio = float(total) * float(s[1])
+        newspaper = float(total) * float(s[2])
+    else:
+        channel_shares = METRICS.get("channelShares") or METRICS.get("metrics", {}).get("channelShares")
+        if channel_shares and len(channel_shares) == 3:
+            s = np.array(channel_shares, dtype=float)
+            s = s / s.sum()
+            tv = float(total) * float(s[0])
+            radio = float(total) * float(s[1])
+            newspaper = float(total) * float(s[2])
+        else:
+            tv = radio = newspaper = float(total) / 3.0
+
+    X = to_model_input(tv, radio, newspaper)
+    pred_roi = ROI_MODEL.predict(X)
+    pred_val = float(pred_roi[0])
+    metrics = METRICS.get("metrics", METRICS)
+    return {"predicted_roi": pred_val, "predicted_roi_pct": pred_val * 100.0, "channels": {"tv": tv, "radio": radio, "newspaper": newspaper}, "metrics": metrics}
+
+
+@app.get("/health")
+def health():
+    return {"status": "ok", "model_loaded": MODEL is not None}
+
+
+@app.post("/predict/channels")
+def predict_channels(inp: ChannelsInput):
+    if MODEL is None:
+        return {"error": "Model is not available on server. Check server logs."}
+
+    tv = inp.tv
+    radio = inp.radio
+    newspaper = inp.newspaper
+    X = to_model_input(tv, radio, newspaper)
+    pred = MODEL.predict(X)
+    pred_k = float(pred[0])
+    metrics = METRICS.get("metrics", METRICS)
+    roi = compute_roi(pred_k, inp.price_per_unit or 10.0, tv + radio + newspaper)
+    return {"predicted_k": pred_k, "predicted_units": int(round(roi["units"])) if False else roi["units"], "roi": roi, "metrics": metrics}
+
+
+@app.post("/predict/total")
+def predict_total(inp: TotalInput):
+    if MODEL is None:
+        return {"error": "Model is not available on server. Check server logs."}
+
+    total = inp.total
+    shares = inp.shares
+    if shares and len(shares) == 3:
+        # interpret shares as proportions or percentages
+        s = np.array(shares, dtype=float)
+        # normalize
+        if s.sum() > 0:
+            s = s / s.sum()
+        tv = float(total) * float(s[0])
+        radio = float(total) * float(s[1])
+        newspaper = float(total) * float(s[2])
+    else:
+        # if no shares provided, fallback to channelShares in metrics or equal split
+        channel_shares = METRICS.get("channelShares") or METRICS.get("metrics", {}).get("channelShares")
+        if channel_shares and len(channel_shares) == 3:
+            s = np.array(channel_shares, dtype=float)
+            s = s / s.sum()
+            tv = float(total) * float(s[0])
+            radio = float(total) * float(s[1])
+            newspaper = float(total) * float(s[2])
+        else:
+            # equal split
+            tv = radio = newspaper = float(total) / 3.0
+
+    X = to_model_input(tv, radio, newspaper)
+    pred = MODEL.predict(X)
+    pred_k = float(pred[0])
+    roi = compute_roi(pred_k, inp.price_per_unit or 10.0, tv + radio + newspaper)
+    metrics = METRICS.get("metrics", METRICS)
+    return {"predicted_k": pred_k, "predicted_units": roi["units"], "roi": roi, "channels": {"tv": tv, "radio": radio, "newspaper": newspaper}, "metrics": metrics}

@@ -1,0 +1,36 @@
+# Global ignores
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
+*.log
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+*.pyo
+*.pyd
+.env
+.env.*
+.venv/
+.venv*/
+
+# Node / frontend artifacts
+node_modules/
+**/node_modules/
+dist/
+**/dist/
+coverage/
+
+# Local environments & tooling
+campaign-sales-bot/.venv/
+scripts/.venv/
+server/.venv/
+
+# Build caches
+.cache/
+.npm/
+
+# Jupyter checkpoints
+.ipynb_checkpoints/

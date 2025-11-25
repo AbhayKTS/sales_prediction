@@ -1,0 +1,33 @@
+[build]
+command = "npm ci && npm run build"
+publish = "dist"
+
+# Local dev runner: Netlify CLI will run this and proxy to it.
+[dev]
+command = "npm run dev"
+# Vite default port
+targetPort = 5173
+# Netlify dev UI port
+port = 8888
+
+# Proxy API calls to the deployed FastAPI backend (Render)
+[[redirects]]
+from = "/predict/*"
+to = "https://sales-prediction-api-obqd.onrender.com/predict/:splat"
+status = 200
+force = true
+
+[[redirects]]
+from = "/api/*"
+to = "https://sales-prediction-api-obqd.onrender.com/api/:splat"
+status = 200
+force = true
+
+[context.production.environment]
+VITE_API_BASE_URL = "/predict"
+
+[context.deploy-preview.environment]
+VITE_API_BASE_URL = "/predict"
+
+[context.branch-deploy.environment]
+VITE_API_BASE_URL = "/predict"
