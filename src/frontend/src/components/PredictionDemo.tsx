@@ -114,12 +114,17 @@ const getApiBase = () => {
   if (typeof window === "undefined") return "";
   const envBase = getEnvBaseUrl();
   const apiWindow = window as typeof window & { __API_BASE__?: string };
+  
+  // Fallback to the live Render URL if environment variables fail
+  const productionFallback = "https://sales-prediction-yy5a.onrender.com";
+
   const candidate =
     apiWindow.__API_BASE__ ??
     envBase ??
     (window.location.hostname === "localhost" || window.location.hostname === "127.0.0.1"
       ? "http://127.0.0.1:8000"
-      : "");
+      : productionFallback);
+      
   if (!candidate) return "";
   return candidate.endsWith("/") ? candidate.slice(0, -1) : candidate;
 };
